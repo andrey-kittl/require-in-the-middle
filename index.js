@@ -5,11 +5,15 @@ const Module = require('module')
 const debug = require('debug')('require-in-the-middle')
 const moduleDetailsFromPath = require('module-details-from-path')
 
+// A lightweight placeholder to mark modules that have been processed but not patched.
+const PROCESSED_UNPATCHED_PLACEHOLDER = Symbol('ritm-unpatched')
+
 // Using the default export is discouraged, but kept for backward compatibility.
 // Use this instead:
 //    const { Hook } = require('require-in-the-middle')
 module.exports = Hook
 module.exports.Hook = Hook
+module.exports._PROCESSED_UNPATCHED_PLACEHOLDER = PROCESSED_UNPATCHED_PLACEHOLDER
 
 let builtinModules // Set<string>
 
@@ -193,8 +197,15 @@ function Hook (modules, options, onrequire) {
 
     // return known patched modules immediately
     if (self._cache.has(filename, core) === true) {
-      debug('returning already patched cached module: %s', filename)
-      return self._cache.get(filename, core)
+      const cached = self._cache.get(filename, core)
+      if (cached === PROCESSED_UNPATCHED_PLACEHOLDER) {
+        // This module was seen before and not patched.
+        // Return the original exports directly from Node's native cache.
+        return self._origRequire.apply(this, args)
+      }
+      // Otherwise, it was patched or is currently being patched (re-entrancy).
+      debug('returning already patched/in-progress module: %s', filename)
+      return cached
     }
 
     // Check if this module has a patcher in-progress already.
@@ -276,7 +287,7 @@ function Hook (modules, options, onrequire) {
           res = require.resolve(moduleName, { paths: [basedir] })
         } catch (e) {
           debug('could not resolve module: %s', moduleName)
-          self._cache.set(filename, exports, core)
+          self._cache.set(filename, PROCESSED_UNPATCHED_PLACEHOLDER, core)
           return exports // abort if module could not be resolved (e.g. no main in package.json and no index.js file)
         }
 
@@ -288,21 +299,30 @@ function Hook (modules, options, onrequire) {
             debug('preparing to process require of internal file: %s', moduleName)
           } else {
             debug('ignoring require of non-main module file: %s', res)
-            self._cache.set(filename, exports, core)
+            self._cache.set(filename, PROCESSED_UNPATCHED_PLACEHOLDER, core)
             return exports // abort if not main module file
           }
         }
       }
     }
 
-    // ensure that the cache entry is assigned a value before calling
-    // onrequire, in case calling onrequire requires the same module.
+    // Pre-cache original exports to handle re-entrancy from circular requires.
     self._cache.set(filename, exports, core)
+
     debug('calling require hook: %s', moduleName)
     const patchedExports = onrequire(exports, moduleName, basedir)
-    self._cache.set(filename, patchedExports, core)
 
-    debug('returning module: %s', moduleName)
+    if (patchedExports !== exports) {
+      // The module was patched. Overwrite the cache with the new version.
+      self._cache.set(filename, patchedExports, core)
+    } else {
+      // The module was not patched. Overwrite the cache with our lightweight
+      // placeholder. This fixes the memory leak while still marking the
+      // module as "processed" to prevent re-running the hook (fixing performance).
+      self._cache.set(filename, PROCESSED_UNPATCHED_PLACEHOLDER, core)
+    }
+
+    // Return the actual exports for this initial call.
     return patchedExports
   }
 }
