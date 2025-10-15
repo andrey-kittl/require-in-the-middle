@@ -128,3 +128,47 @@ test('should cache a placeholder when exiting early for an unpatched internal mo
   t.ok(hook._cache.has(filename, false), 'cache should have an entry for the internal module')
   t.equal(hook._cache.get(filename, false), _PROCESSED_UNPATCHED_PLACEHOLDER, 'cache entry should be the placeholder Symbol')
 })
+
+test('should treat in place mutation as processed and keep original reference', function (t) {
+  t.plan(9)
+
+  let onRequireCalls = 0
+  const hook = new Hook(['circular'], function (exports, name, basedir) {
+    onRequireCalls++
+    // mutate in place and return the same reference
+    exports.bar = 2
+    return exports
+  })
+
+  t.on('end', function () {
+    hook.unhook()
+    delete require.cache[require.resolve('./node_modules/circular')]
+  })
+
+  // first load
+  const mod1 = require('./node_modules/circular')
+  t.equal(onRequireCalls, 1, 'onrequire called once on first load')
+  t.deepEqual(mod1, { foo: 1, bar: 2 }, 'exports mutated in place')
+
+  // second load uses Node cache, your cache holds the placeholder
+  const mod2 = require('./node_modules/circular')
+  t.equal(onRequireCalls, 1, 'onrequire not called again without cache delete')
+  t.equal(mod1, mod2, 'reference is unchanged between requires')
+  t.equal(mod2.bar, 2, 'mutation visible on second require')
+
+  const filename = require.resolve('./node_modules/circular')
+  t.ok(hook._cache.has(filename, false), 'cache has an entry')
+  t.equal(
+    hook._cache.get(filename, false),
+    _PROCESSED_UNPATCHED_PLACEHOLDER,
+    'cache stores the placeholder for in place mutation'
+  )
+
+  // delete from require cache to simulate reload
+  delete require.cache[filename]
+  const mod3 = require('./node_modules/circular')
+  t.equal(onRequireCalls, 2, 'onrequire called again after cache delete')
+  // fresh object reloaded and mutated again to the same surface shape
+  // value remains 2 rather than accumulating
+  t.deepEqual(mod3, { foo: 1, bar: 2 }, 'exports mutated again after reload')
+})

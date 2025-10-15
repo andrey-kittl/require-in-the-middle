@@ -312,7 +312,7 @@ function Hook (modules, options, onrequire) {
     debug('calling require hook: %s', moduleName)
     const patchedExports = onrequire(exports, moduleName, basedir)
 
-    if (patchedExports !== exports) {
+    if (patchedExports !== exports || shallowMutated(exports, patchedExports)) {
       // The module was patched. Overwrite the cache with the new version.
       self._cache.set(filename, patchedExports, core)
     } else {
@@ -350,4 +350,40 @@ Hook.prototype.unhook = function () {
 function resolveModuleName (stat) {
   const normalizedPath = path.sep !== '/' ? stat.path.split(path.sep).join('/') : stat.path
   return path.posix.join(stat.name, normalizedPath).replace(normalize, '')
+}
+
+function shallowMutated (before, after) {
+  if (before === null || after === null) return before !== after
+  if (typeof before !== 'object' && typeof before !== 'function') return before !== after
+  if (typeof after !== 'object' && typeof after !== 'function') return true
+  if (Object.getPrototypeOf(before) !== Object.getPrototypeOf(after)) return true
+
+  const beforeKeys = Reflect.ownKeys(before)
+  const afterKeys = Reflect.ownKeys(after)
+  if (beforeKeys.length !== afterKeys.length) return true
+  // order independent set check
+  for (const k of beforeKeys) if (!afterKeys.includes(k)) return true
+
+  const bd = Object.getOwnPropertyDescriptors(before)
+  const ad = Object.getOwnPropertyDescriptors(after)
+
+  for (const k of beforeKeys) {
+    const b = bd[k]
+    const a = ad[k]
+    // descriptor flags
+    if (!a) return true
+    if (b.enumerable !== a.enumerable) return true
+    if (b.configurable !== a.configurable) return true
+    if ('writable' in b || 'writable' in a) {
+      if (b.writable !== a.writable) return true
+    }
+    // value or accessor identity
+    if ('value' in b || 'value' in a) {
+      if (b.value !== a.value) return true
+    } else {
+      if (b.get !== a.get) return true
+      if (b.set !== a.set) return true
+    }
+  }
+  return false
 }
